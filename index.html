@@ -1,4 +1,10 @@
-<!-- FILE-SEARCH WIDGET v2 -->
+<!doctype html>
+<html lang="ru">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Поиск файлов</title>
+
+<!-- FILE-SEARCH WIDGET v2 (с вашей ссылкой CSV) -->
 <div id="file-widget" style="max-width:900px;margin:0 auto;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Arial">
   <div style="background:#f6f7f9;border:1px solid #e5e7eb;border-radius:16px;padding:18px">
     <h2 style="margin:0 0 12px;font-size:26px;font-weight:800">Найти файл по ссылке</h2>
@@ -25,7 +31,6 @@
       <div id="rows"></div>
       <div id="empty" style="padding:14px;color:#6b7280;display:none">Ничего не найдено — попробуйте по-другому сформулировать</div>
 
-      <!-- Пагинация -->
       <div id="pager" style="display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border-top:1px solid #e5e7eb">
         <button id="prev" disabled style="padding:8px 12px;border:1px solid #e5e7eb;border-radius:8px;background:#fff;cursor:pointer">Назад</button>
         <div id="pageInfo" style="color:#374151">Стр. 1/1</div>
@@ -41,208 +46,107 @@
 <script>
 (() => {
   // ==== НАСТРОЙКИ ====
-  // ==== НАСТРОЙКИ ====
-const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQr5tjcoANOKmeK8Mx4B2nHKrHdprWIcVrMBGd1Iqo4NW3-0xO9dHaTGR5HWxFa3DWWOAl6AkxVF7Lw/pub?gid=0&single=true&output=csv";
-const CACHE_TTL_MIN = 60;
-const PAGE_SIZE = 20;
-// ====================
-
+  const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQr5tjcoANOKmeK8Mx4B2nHKrHdprWIcVrMBGd1Iqo4NW3-0xO9dHaTGR5HWxFa3DWWOAl6AkxVF7Lw/pub?gid=0&single=true&output=csv";
+  const CACHE_KEY = "file_search_csv_v2";
+  const CACHE_TTL_MIN = 60;     // кэш на 60 мин
+  const PAGE_SIZE = 20;         // элементов на страницу
   // ====================
-
-  const $  = s => document.querySelector(s);
-  const $$ = s => document.querySelectorAll(s);
-
-  const rowsBox = $("#rows");
-  const emptyBox = $("#empty");
-  const meta = $("#meta");
-  const q = $("#q");
-  const showAllBtn = $("#showAll");
-  const resetClicksBtn = $("#resetClicks");
-  const hint = $("#csv-hint");
-
-  const pager = $("#pager");
-  const prevBtn = $("#prev");
-  const nextBtn = $("#next");
-  const pageInfo = $("#pageInfo");
-
+  const $  = s => document.querySelector(s), $$ = s => document.querySelectorAll(s);
+  const rowsBox=$("#rows"), emptyBox=$("#empty"), meta=$("#meta"), q=$("#q");
+  const showAllBtn=$("#showAll"), resetClicksBtn=$("#resetClicks"), hint=$("#csv-hint");
+  const pager=$("#pager"), prevBtn=$("#prev"), nextBtn=$("#next"), pageInfo=$("#pageInfo");
   hint.textContent = CSV_URL;
+  let DATA=[], FILTERED=[], page=1;
 
-  let DATA = [];     // весь CSV
-  let FILTERED = []; // результат поиска
-  let page = 1;      // текущая страница
+  const norm=s=>(s||"").toString().toLowerCase().normalize("NFKD").replace(/[ё]/g,"е").replace(/[\u0300-\u036f]/g,"").trim();
+  const escapeHTML=s=>(s||"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;");
+  const mark=(html,q)=>{ if(!q) return escapeHTML(html); try{const re=new RegExp("("+q.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+")","ig"); return escapeHTML(html).replace(re,"<mark>$1</mark>");}catch{ return escapeHTML(html);}};
 
-  const norm = s => (s||"").toString().toLowerCase()
-                     .normalize("NFKD")
-                     .replace(/[ё]/g,"е")
-                     .replace(/[\u0300-\u036f]/g,"")
-                     .trim();
-
-  const escapeHTML = s => (s||"")
-    .replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;");
-
-  const mark = (html, query) => {
-    if (!query) return escapeHTML(html);
-    try {
-      const re = new RegExp("(" + query.replace(/[.*+?^${}()|[\]\\]/g,"\\$&") + ")", "ig");
-      return escapeHTML(html).replace(re, "<mark>$1</mark>");
-    } catch(_) { return escapeHTML(html); }
-  };
-
-  // CSV-парсер
+  // CSV парсер (+ автоопределение , / ;)
   function parseCSV(text){
+    const first = text.split(/\r?\n/).find(l=>l.trim().length)||"";
+    const delim = (first.match(/;/g)||[]).length > (first.match(/,/g)||[]).length ? ";" : ",";
     const lines = text.replace(/\r/g,"").split("\n").filter(x=>x.trim().length);
-    if (!lines.length) return [];
-    const head = splitCSVLine(lines[0]).map(norm);
-    return lines.slice(1).map(line => {
-      const cells = splitCSVLine(line);
-      const obj = {};
-      head.forEach((h,i)=>obj[h]=cells[i] ?? "");
-      return obj;
+    if(!lines.length) return [];
+    const head = splitCSVLine(lines[0],delim).map(norm);
+    return lines.slice(1).map(line=>{
+      const cells = splitCSVLine(line,delim); const obj={}; head.forEach((h,i)=>obj[h]=cells[i]??""); return obj;
     });
   }
-  function splitCSVLine(line){
-    const out = []; let cur=""; let q=false;
-    for (let i=0;i<line.length;i++){
-      const c=line[i], n=line[i+1];
-      if (c === '"' ){ if (q && n === '"'){ cur+='"'; i++; } else { q=!q; } }
-      else if (c === ',' && !q){ out.push(cur); cur=""; }
-      else cur += c;
-    }
-    out.push(cur);
-    return out;
+  function splitCSVLine(line,d){
+    const out=[]; let cur=""; let q=false;
+    for(let i=0;i<line.length;i++){ const c=line[i],n=line[i+1];
+      if(c=='"'){ if(q&&n=='"'){cur+='"';i++;} else q=!q; }
+      else if(c==d && !q){ out.push(cur); cur=""; }
+      else cur+=c;
+    } out.push(cur); return out;
   }
 
-  // Кэш
-  function loadCache(){
-    try{
-      const raw = localStorage.getItem(CACHE_KEY);
-      if(!raw) return null;
-      const {ts, data, url} = JSON.parse(raw);
-      if(url !== CSV_URL) return null;
-      if(Date.now() - ts > CACHE_TTL_MIN*60*1000) return null;
-      return data;
-    }catch{ return null; }
-  }
-  function saveCache(data){
-    try{
-      localStorage.setItem(CACHE_KEY, JSON.stringify({ts:Date.now(), data, url:CSV_URL}));
-    }catch{}
-  }
+  function loadCache(){ try{const raw=localStorage.getItem(CACHE_KEY); if(!raw) return null; const {ts,data,url}=JSON.parse(raw);
+    if(url!==CSV_URL) return null; if(Date.now()-ts>CACHE_TTL_MIN*60*1000) return null; return data;}catch{ return null; } }
+  function saveCache(d){ try{localStorage.setItem(CACHE_KEY, JSON.stringify({ts:Date.now(),data:d,url:CSV_URL}));}catch{} }
 
   async function loadCSV(url){
-    const cached = loadCache();
-    if (cached) return cached;
-    const res = await fetch(url, {cache:"no-store"});
-    if(!res.ok) throw new Error("HTTP "+res.status);
-    const txt = await res.text();
-    if(!txt.trim()) throw new Error("Пустой CSV");
-    const data = parseCSV(txt);
-    saveCache(data);
-    return data;
+    const cached=loadCache(); if(cached) return cached;
+    const res=await fetch(url,{cache:"no-store"}); if(!res.ok) throw new Error("HTTP "+res.status);
+    const txt=await res.text(); if(!txt.trim()) throw new Error("Пустой CSV");
+    const data=parseCSV(txt); saveCache(data); return data;
   }
 
-  // Нормализация полей
   function mapRow(r){
-    const get = k => r[k] ?? r[k.toLowerCase()] ?? "";
-    const name = get("name") || get("название") || get("file") || get("файл");
-    const url  = get("url")  || get("ссылка") || get("link");
-    const size = get("size") || get("размер");
-    const tags = get("tags") || get("теги");
-    const desc = get("desc") || get("описание");
-    return {name, url, size, tags, desc};
+    const get=k=>r[k]??r[k.toLowerCase()]??"";
+    const name=get("name")||get("название")||get("file")||get("файл");
+    const url =get("url")||get("ссылка")||get("link");
+    const size=get("size")||get("размер");
+    const tags=get("tags")||get("теги");
+    const desc=get("desc")||get("описание");
+    return {name,url,size,tags,desc};
   }
 
-  // Счётчики кликов (per-URL)
-  const CLICK_KEY = "file_search_clicks_v2";
-  function getClicks(){ try{ return JSON.parse(localStorage.getItem(CLICK_KEY)||"{}"); }catch{ return {}; } }
-  function setClicks(v){ try{ localStorage.setItem(CLICK_KEY, JSON.stringify(v)); }catch{} }
-  function incClick(url){
-    const m = getClicks();
-    m[url] = (m[url]||0) + 1;
-    setClicks(m);
-  }
+  const CLICK_KEY="file_search_clicks_v2";
+  function getClicks(){ try{return JSON.parse(localStorage.getItem(CLICK_KEY)||"{}");}catch{return{};} }
+  function setClicks(v){ try{localStorage.setItem(CLICK_KEY,JSON.stringify(v));}catch{} }
+  function incClick(u){ const m=getClicks(); m[u]=(m[u]||0)+1; setClicks(m); }
 
-  function paginate(list, p, size){
-    const total = Math.max(1, Math.ceil(list.length / size));
-    const cur = Math.min(Math.max(1,p), total);
-    const start = (cur-1)*size;
-    return {slice:list.slice(start, start+size), cur, total};
-  }
+  function paginate(list,p,size){ const total=Math.max(1,Math.ceil(list.length/size));
+    const cur=Math.min(Math.max(1,p),total); const start=(cur-1)*size; return {slice:list.slice(start,start+size),cur,total}; }
 
-  function render(list, queryStr){
-    const {slice, cur, total} = paginate(list, page, PAGE_SIZE);
-    page = cur;
-
-    const clicks = getClicks();
+  function render(list,qstr){
+    const {slice,cur,total}=paginate(list,page,PAGE_SIZE); page=cur;
+    const clicks=getClicks();
     rowsBox.innerHTML = slice.map(r=>{
-      const a = mapRow(r);
-      const title = a.desc ? `${a.name} — ${a.desc}` : a.name;
-      const qn = norm(queryStr);
-      const cnt = clicks[a.url] || 0;
-      return `
-        <div class="row" style="display:grid;grid-template-columns:1fr 110px 120px 110px;gap:0;border-top:1px solid #e5e7eb;padding:12px 14px;align-items:center">
-          <div>
-            <div style="font-weight:600">${mark(title, qn)}</div>
-            ${a.tags ? `<div style="color:#6b7280;font-size:12px">#${escapeHTML(a.tags)}</div>` : ""}
-          </div>
-          <div>${escapeHTML(a.size||"—")}</div>
-          <div>
-            ${a.url ? `<a href="${escapeHTML(a.url)}" target="_blank" rel="noopener" data-url="${escapeHTML(a.url)}"
-               class="open-btn" style="display:inline-block;background:#111827;color:#fff;text-decoration:none;border-radius:8px;padding:8px 12px;font-weight:700">Открыть</a>` : "—"}
-          </div>
-          <div data-clicks-for="${escapeHTML(a.url||'')}">${cnt}</div>
-        </div>`;
+      const a=mapRow(r); const title=a.desc?`${a.name} — ${a.desc}`:a.name; const qn=norm(qstr); const cnt=clicks[a.url]||0;
+      return `<div class="row" style="display:grid;grid-template-columns:1fr 110px 120px 110px;gap:0;border-top:1px solid #e5e7eb;padding:12px 14px;align-items:center">
+        <div><div style="font-weight:600">${mark(title,qn)}</div>${a.tags?`<div style="color:#6b7280;font-size:12px">#${escapeHTML(a.tags)}</div>`:""}</div>
+        <div>${escapeHTML(a.size||"—")}</div>
+        <div>${a.url?`<a href="${escapeHTML(a.url)}" target="_blank" rel="noopener" data-url="${escapeHTML(a.url)}" class="open-btn" style="display:inline-block;background:#111827;color:#fff;text-decoration:none;border-radius:8px;padding:8px 12px;font-weight:700">Открыть</a>`:"—"}</div>
+        <div data-clicks-for="${escapeHTML(a.url||'')}">${cnt}</div></div>`;
     }).join("");
-
-    emptyBox.style.display = slice.length ? "none" : "block";
+    emptyBox.style.display = slice.length?"none":"block";
     meta.textContent = `Загружено файлов: ${DATA.length} • Найдено: ${list.length}`;
     pageInfo.textContent = `Стр. ${cur} / ${total}`;
-    prevBtn.disabled = cur<=1;
-    nextBtn.disabled = cur>=total;
-
-    // обработчик кликов по "Открыть"
-    $$(".open-btn").forEach(a=>{
-      a.addEventListener("click", () => {
-        const u = a.getAttribute("data-url");
-        incClick(u);
-        const cell = document.querySelector('[data-clicks-for="'+CSS.escape(u)+'"]');
-        if(cell) cell.textContent = (parseInt(cell.textContent)||0) + 1;
-      }, {once:false});
+    prevBtn.disabled = cur<=1; nextBtn.disabled = cur>=total;
+    document.querySelectorAll(".open-btn").forEach(a=>{
+      a.addEventListener("click",()=>{ const u=a.getAttribute("data-url"); incClick(u);
+        const cell=document.querySelector('[data-clicks-for="'+CSS.escape(u)+'"]'); if(cell) cell.textContent=(parseInt(cell.textContent)||0)+1; });
     });
   }
 
-  function doSearch(qstr){
-    const n = norm(qstr);
-    if (n.length < 2) { FILTERED = []; render([], n); return; }
-    FILTERED = DATA.filter(r=>{
-      const a = mapRow(r);
-      const blob = [a.name,a.desc,a.tags,a.url].map(norm).join(" ");
-      return blob.includes(n);
-    });
-    page = 1;
-    render(FILTERED, qstr);
+  function doSearch(v){
+    const n=norm(v); if(n.length<2){ FILTERED=[]; render([],n); return; }
+    FILTERED = DATA.filter(r=>{ const a=mapRow(r); const blob=[a.name,a.desc,a.tags,a.url].map(norm).join(" "); return blob.includes(n); });
+    page=1; render(FILTERED,v);
   }
 
-  // События
-  q.addEventListener("input", e => doSearch(e.target.value));
-  showAllBtn.addEventListener("click", () => { page=1; FILTERED = DATA.slice(); render(FILTERED, ""); });
-  resetClicksBtn.addEventListener("click", () => { localStorage.removeItem(CLICK_KEY); render(FILTERED.length?FILTERED:[], q.value); });
+  q.addEventListener("input",e=>doSearch(e.target.value));
+  document.getElementById("showAll").addEventListener("click",()=>{ page=1; FILTERED=DATA.slice(); render(FILTERED,""); });
+  document.getElementById("resetClicks").addEventListener("click",()=>{ localStorage.removeItem(CLICK_KEY); render(FILTERED.length?FILTERED:[], q.value); });
+  prevBtn.addEventListener("click",()=>{ if(page>1){ page--; render(FILTERED.length?FILTERED:[], q.value); } });
+  nextBtn.addEventListener("click",()=>{ page++; render(FILTERED.length?FILTERED:[], q.value); });
 
-  prevBtn.addEventListener("click", () => { if(page>1){ page--; render(FILTERED.length?FILTERED:[], q.value); } });
-  nextBtn.addEventListener("click", () => { page++; render(FILTERED.length?FILTERED:[], q.value); });
-
-  // Инициализация
-  (async () => {
-    try {
-      DATA = await loadCSV(CSV_URL);
-      meta.textContent = `Загружено файлов: ${DATA.length}`;
-      render([], "");
-    } catch(err){
-      rowsBox.innerHTML = `<div style="padding:14px;color:#b91c1c">Ошибка загрузки CSV: ${escapeHTML(err.message)}</div>`;
-      emptyBox.style.display = "none";
-      meta.textContent = "Загрузка не удалась";
-      pager.style.display = "none";
-    }
-  })();
+  (async()=>{ try{ DATA=await loadCSV(CSV_URL); meta.textContent=`Загружено файлов: ${DATA.length}`; render([], ""); }
+  catch(err){ rowsBox.innerHTML=`<div style="padding:14px;color:#b91c1c">Ошибка загрузки CSV: ${escapeHTML(err.message)}</div>`;
+    emptyBox.style.display="none"; meta.textContent="Загрузка не удалась"; document.getElementById("pager").style.display="none"; }})();
 })();
 </script>
+</html>
